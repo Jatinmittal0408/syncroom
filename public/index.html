@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
   <title>SyncRoom — Watch Together</title>
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
@@ -45,6 +45,9 @@
       color: var(--text);
       -webkit-font-smoothing: antialiased;
       overflow-x: hidden;
+      /* Prevent pull-to-refresh and overscroll bounce on mobile */
+      overscroll-behavior: none;
+      -webkit-overflow-scrolling: touch;
     }
 
     ::-webkit-scrollbar { width: 4px; }

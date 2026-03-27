@@ -875,6 +875,7 @@ window.onYouTubeIframeAPIReady = function () {
     events: {
       onReady:       onPlayerReady,
       onStateChange: onPlayerStateChange,
+      onError:       onPlayerError,
     },
   });
 };
@@ -1010,6 +1011,24 @@ function onPlayerStateChange(event) {
 
   } else if (state === YTS.BUFFERING) {
     setSyncStatus('resyncing', 'Buffering…');
+  }
+}
+
+// ── Player error handler ───────────────────────────────────
+function onPlayerError(event) {
+  const code = event.data;
+  // 101 / 150 = embedding disabled by video owner
+  // 100       = video not found or private
+  // 2         = invalid video ID
+  if (code === 101 || code === 150) {
+    showToast('❌ Embedding blocked by uploader — try a different video', 6000);
+    setSyncStatus('waiting', 'Embedding disabled');
+  } else if (code === 100) {
+    showToast('❌ Video not found or set to private', 5000);
+    setSyncStatus('waiting', 'Video unavailable');
+  } else {
+    showToast(`⚠️ Player error (code ${code})`, 4000);
+    setSyncStatus('waiting', 'Playback error');
   }
 }
 
