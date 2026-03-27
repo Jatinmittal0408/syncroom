@@ -1,0 +1,16 @@
+{
+  "name": "youtube-sync",
+  "version": "1.0.0",
+  "description": "Real-time YouTube sync for two users",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "express-rate-limit": "^8.3.1",
+    "helmet": "^8.1.0",
+    "socket.io": "^4.7.2",
+    "youtube-search-api": "^2.0.1"
+  }
+}
