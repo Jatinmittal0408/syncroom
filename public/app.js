@@ -867,9 +867,10 @@ window.onYouTubeIframeAPIReady = function () {
     width: '100%',
     playerVars: {
       playsinline:    1,
-      rel:            1, // Keep rel=1 so YouTube's full recommendation engine works
+      rel:            1,
       modestbranding: 1,
       autoplay:       0,
+      origin:         location.origin,
     },
     events: {
       onReady:       onPlayerReady,
@@ -1181,6 +1182,21 @@ function appendChatMessage({ type, mine, displayName, role: msgRole, text, ts })
       chatUnread.classList.add('has-unread');
     }
   }
+
+  // Mobile: bump chat-toggle badge when chat panel is closed
+  if (!mine && type !== 'system') {
+    const chatCol = $('chat-col');
+    const isMobileClosed = chatCol && !chatCol.classList.contains('open') &&
+                           window.getComputedStyle(chatCol).height === '0px';
+    if (isMobileClosed) {
+      const badge = $('chat-toggle-badge');
+      if (badge) {
+        const n = (parseInt(badge.textContent) || 0) + 1;
+        badge.textContent = n;
+        badge.classList.add('show');
+      }
+    }
+  }
 }
 
 function sendChatMessage() {
@@ -1226,6 +1242,25 @@ if (chatMessages) {
   chatMessages.addEventListener('scroll', () => {
     const atBottom = chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight < 10;
     if (atBottom) clearUnread();
+  });
+}
+
+// ── Mobile chat toggle ─────────────────────────────────────
+const chatToggleBtn = $('chat-toggle');
+
+if (chatToggleBtn) {
+  chatToggleBtn.addEventListener('click', () => {
+    const chatCol = $('chat-col');
+    if (!chatCol) return;
+    const isOpen = chatCol.classList.toggle('open');
+    // Update button icon
+    const badge = $('chat-toggle-badge');
+    chatToggleBtn.childNodes[0].textContent = isOpen ? '✕' : '💬';
+    if (isOpen) {
+      // Clear mobile unread badge
+      if (badge) { badge.textContent = ''; badge.classList.remove('show'); }
+      if (chatMessages) chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
   });
 }
 

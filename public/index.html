@@ -718,14 +718,73 @@
     }
     #toast.show { transform: translateX(-50%) translateY(0); }
 
-    /* MOBILE */
+    /* ── MOBILE ─────────────────────────────────────────── */
+    #chat-toggle { display: none; }
+
     @media (max-width: 768px) {
-      #main { flex-direction: column; height: auto; overflow: visible; }
-      #room { height: auto; min-height: 100vh; overflow: visible; }
-      #player-col { overflow-y: visible; }
-      #chat-col { width: 100%; border-left: none; border-top: 1px solid var(--border); height: 340px; }
-      .landing-title { font-size: 2.2rem; }
-      #toolbar { gap: 6px; }
+      /* Room layout */
+      #main  { flex-direction: column; overflow: visible; }
+      #room  { height: auto; min-height: 100svh; overflow-y: auto; overflow-x: hidden; }
+      #player-col { overflow-y: visible; padding: 10px; gap: 8px; }
+
+      /* Header — tighter on mobile */
+      #header { padding: 8px 12px; gap: 8px; flex-wrap: nowrap; }
+      .header-logo { font-size: .95rem; }
+      #header-room { max-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .72rem; }
+      #user-count-display { display: none; }
+      #conn-status { font-size: .65rem; padding: 3px 8px; }
+      #chat-toggle { display: flex; position: relative; }
+      #chat-toggle-badge {
+        position: absolute; top: -4px; right: -4px;
+        background: var(--p); color: #fff;
+        border-radius: 99px; font-size: .6rem; font-weight: 700;
+        padding: 1px 5px; display: none;
+      }
+      #chat-toggle-badge.show { display: block; }
+
+      /* Toolbar — horizontally scrollable strip */
+      #toolbar {
+        overflow-x: auto; flex-wrap: nowrap;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none; padding-bottom: 2px;
+      }
+      #toolbar::-webkit-scrollbar { display: none; }
+      #toolbar select, #toolbar button { flex-shrink: 0; }
+
+      /* Touch targets — 44px minimum */
+      button { min-height: 44px; }
+      .btn-icon { min-width: 48px; min-height: 48px; font-size: 1.15rem; padding: 10px; }
+
+      /* Prevent iOS auto-zoom on input focus (needs font-size ≥ 16px) */
+      input[type=text], input[type=password], select { font-size: 16px !important; }
+
+      /* Syncbar — compact on mobile */
+      #syncbar { flex-wrap: wrap; gap: 6px; }
+      #room-id-display { display: none; }
+      #mic-status { font-size: .7rem; }
+
+      /* Chat — hidden by default, slides open */
+      #chat-col {
+        width: 100%; border-left: none;
+        border-top: 1px solid var(--border);
+        height: 0; overflow: hidden;
+        transition: height .3s ease;
+        flex-shrink: 0;
+      }
+      #chat-col.open { height: 380px; }
+
+      /* Landing */
+      .landing-title { font-size: 2rem; }
+      .hero-svg { width: 110px; height: 110px; }
+      .landing-card { padding: 24px 20px; }
+      .landing-sub { font-size: .85rem; margin-bottom: 24px; }
+
+      /* Toast above mobile nav / keyboard */
+      #toast { bottom: 70px; max-width: 90vw; white-space: normal; text-align: center; }
+
+      /* Search dropdown — full screen feel */
+      #search-dropdown { max-height: 280px; }
+      .search-result img { width: 60px; height: 34px; }
     }
   </style>
 </head>
@@ -830,6 +889,7 @@
     <span class="badge" id="role-badge">Host</span>
     <span id="user-count-display">1 user</span>
     <span class="h-spacer"></span>
+    <button class="btn-icon" id="chat-toggle">💬<span id="chat-toggle-badge"></span></button>
     <span id="conn-status" class="connected">
       <span class="dot"></span>Connected
     </span>
