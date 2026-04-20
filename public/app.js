@@ -680,6 +680,21 @@ function initSocket() {
 
   socket.on('host-request-rejected', () => showToast('Host rejected your request.'));
 
+  // Host briefly disconnected (refresh / net blip). Listeners see this so
+  // they know the silence isn't a bug — and they don't prematurely lose sync.
+  socket.on('host-disconnected-temp', ({ graceMs }) => {
+    if (role !== 'host') {
+      setSyncStatus('waiting', `Host reconnecting… (${Math.ceil(graceMs/1000)}s)`);
+      showToast('Host disconnected briefly — waiting…');
+    }
+  });
+
+  socket.on('host-returned', ({ hostId }) => {
+    if (hostId === socket.id) return;
+    setSyncStatus('synced', 'Host reconnected');
+    showToast('Host is back!');
+  });
+
   // ── Chat ─────────────────────────────────────────────
   socket.on('chat-message', (msg) => {
     appendChatMessage({
@@ -1423,12 +1438,27 @@ if (chatToggleBtn) {
 })();
 
 // Warn before refresh so user knows they're about to leave
+let skipUnloadWarning = false;
 window.addEventListener('beforeunload', (e) => {
-  if (currentRoomId) {
+  if (currentRoomId && !skipUnloadWarning) {
     e.preventDefault();
     e.returnValue = 'You will leave the room.';
     return e.returnValue;
   }
 });
+
+// ── Logout / leave room ────────────────────────────────────
+// Clears stored session and reloads to landing page so user can
+// create / join a different room without fighting the auto-rejoin.
+const btnLogout = $('btn-logout');
+if (btnLogout) {
+  btnLogout.addEventListener('click', () => {
+    if (!confirm('Leave this room?')) return;
+    skipUnloadWarning = true;
+    clearSession();
+    try { socket.disconnect(); } catch (e) {}
+    location.href = location.pathname; // reload to fresh landing
+  });
+}
 
 initSocket();

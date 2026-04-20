@@ -84,9 +84,20 @@ const MAX_JOIN_ATTEMPTS = 5;
 const pendingDeletes = new Map(); // roomId → timeout
 const ROOM_GRACE_MS  = 30 * 1000;
 
+// Host handoff grace period — when host disconnects WITH listeners present,
+// wait this long before promoting a listener. If host reconnects in time,
+// they keep their role. Covers refresh use case.
+const pendingHostHandoff = new Map(); // roomId → { timeout, oldHostId }
+const HOST_GRACE_MS      = 8 * 1000;
+
 function cancelPendingDelete(roomId) {
   const t = pendingDeletes.get(roomId);
   if (t) { clearTimeout(t); pendingDeletes.delete(roomId); }
+}
+
+function cancelPendingHostHandoff(roomId) {
+  const entry = pendingHostHandoff.get(roomId);
+  if (entry) { clearTimeout(entry.timeout); pendingHostHandoff.delete(roomId); }
 }
 
 io.on('connection', (socket) => {
@@ -105,12 +116,15 @@ io.on('connection', (socket) => {
     if (!password || typeof password !== 'string' || password.trim().length < 4)
       return ack && ack({ error: 'Password must be at least 4 characters.' });
 
-    // Recovery path: if room is in grace period (host just disconnected),
-    // allow the original host to reclaim it by re-creating with same password.
-    if (rooms[roomId] && pendingDeletes.has(roomId)) {
+    // Recovery path: if room is in EITHER grace period (pending-delete when host
+    // was alone, OR pending-host-handoff when host had listeners), allow the
+    // original host to reclaim it by re-creating with the same password.
+    const inGrace = rooms[roomId] && (pendingDeletes.has(roomId) || pendingHostHandoff.has(roomId));
+    if (inGrace) {
       if (hashPassword(password.trim()) !== rooms[roomId].passwordHash)
         return ack && ack({ error: 'Room recovering — wrong password.' });
       cancelPendingDelete(roomId);
+      cancelPendingHostHandoff(roomId);
       rooms[roomId].hostSocketId = socket.id;
       socket.displayName = (displayName || '').trim().slice(0, 24) || 'Host';
       socket.join(roomId);
@@ -118,6 +132,7 @@ io.on('connection', (socket) => {
       socket.role   = 'host';
       console.log(`[recover-room] "${roomId}" reclaimed by ${socket.id}`);
       io.to(roomId).emit('user-count', { count: getRoomUserCount(roomId) });
+      io.to(roomId).emit('host-returned', { hostId: socket.id });
       return ack && ack({ role: 'host', recovered: true,
         state: {
           videoId:              rooms[roomId].currentVideoId,
@@ -362,11 +377,28 @@ io.on('connection', (socket) => {
     if (rooms[roomId].hostSocketId === socket.id) {
       const listeners = getListenerIds(roomId).filter(id => id !== socket.id);
       if (listeners.length > 0) {
-        const newHostId = listeners[0];
-        rooms[roomId].hostSocketId = newHostId;
-        const nhs = io.sockets.sockets.get(newHostId);
-        if (nhs) nhs.role = 'host';
-        io.to(roomId).emit('host-transferred', { newHostId, oldHostId: socket.id, reason: 'disconnect' });
+        // Host had listeners — give them 8s to refresh/reconnect before
+        // promoting a listener. Keeps host role through a quick refresh.
+        cancelPendingHostHandoff(roomId);
+        const oldHostId = socket.id;
+        const t = setTimeout(() => {
+          const current = rooms[roomId];
+          pendingHostHandoff.delete(roomId);
+          if (!current) return;
+          // Only promote if original host hasn't returned
+          if (current.hostSocketId !== oldHostId) return;
+          const remaining = getListenerIds(roomId);
+          if (remaining.length === 0) return;
+          const newHostId = remaining[0];
+          current.hostSocketId = newHostId;
+          const nhs = io.sockets.sockets.get(newHostId);
+          if (nhs) nhs.role = 'host';
+          io.to(roomId).emit('host-transferred', { newHostId, oldHostId, reason: 'disconnect' });
+          console.log(`[host-handoff] "${roomId}" → ${newHostId} (grace expired)`);
+        }, HOST_GRACE_MS);
+        pendingHostHandoff.set(roomId, { timeout: t, oldHostId });
+        io.to(roomId).emit('host-disconnected-temp', { graceMs: HOST_GRACE_MS });
+        console.log(`[host-grace] "${roomId}" host ${oldHostId} disconnected — ${HOST_GRACE_MS}ms grace`);
       } else {
         // Host alone — schedule deletion with 30s grace period.
         // Allows refresh/reconnect to recover the room.
