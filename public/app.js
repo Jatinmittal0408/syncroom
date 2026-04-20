@@ -105,6 +105,17 @@ const netflixTimeInput  = $('netflix-time-input');
 const btnNetflixSync    = $('btn-netflix-sync');
 const roomPasswordInput = $('room-password-input');
 
+// ── Stable user ID (for dedup of reconnect chat spam) ─────
+// Persists across tabs of this browser so a refresh/reconnect is recognized
+// as the SAME user, not a fresh join. Used server-side to suppress
+// "X joined/left the room" messages that would otherwise spam on every blip.
+let userId = null;
+try { userId = localStorage.getItem('syncroom-uid'); } catch (e) {}
+if (!userId) {
+  userId = 'u_' + Math.random().toString(36).slice(2, 10) + '_' + Date.now().toString(36);
+  try { localStorage.setItem('syncroom-uid', userId); } catch (e) {}
+}
+
 // ── Session persistence (survives refresh / brief disconnect) ──
 // We store the room creds in sessionStorage and auto-rejoin on:
 //   1. Initial page load (if session exists → user just refreshed)
@@ -488,6 +499,15 @@ function tryAutoRejoin() {
   if (!session || !session.roomId || !session.password) return;
 
   isAutoRejoining = true;
+  // Safety: reset flag if server doesn't respond in 10s so future reconnect
+  // attempts aren't blocked (e.g., Render free-tier cold start, server crash)
+  const stuckTimer = setTimeout(() => {
+    if (isAutoRejoining) {
+      isAutoRejoining = false;
+      console.warn('[auto-rejoin] timed out — will retry on next connect');
+    }
+  }, 10000);
+  const clearStuck = () => clearTimeout(stuckTimer);
 
   // Helper: fall back to join-room as listener (or whatever the server gives us)
   const fallbackJoin = () => {
@@ -495,7 +515,9 @@ function tryAutoRejoin() {
       roomId:      session.roomId,
       displayName: session.displayName,
       password:    session.password,
+      userId,
     }, (res) => {
+      clearStuck();
       isAutoRejoining = false;
       if (!res || res.error) {
         clearSession();
@@ -526,8 +548,10 @@ function tryAutoRejoin() {
       roomId:      session.roomId,
       displayName: session.displayName,
       password:    session.password,
+      userId,
     }, (res) => {
       if (res && !res.error) {
+        clearStuck();
         isAutoRejoining = false;
         if (!currentRoomId) {
           enterRoom(session.roomId, 'host');
@@ -637,6 +661,21 @@ function initSocket() {
     const expectedTime    = isPlaying ? currentTime + networkDelaySec : currentTime;
     const actualTime      = player.getCurrentTime();
     const drift           = Math.abs(expectedTime - actualTime);
+
+    // If the host is playing but our player is paused (buffering, brief net
+    // blip, etc.), resume it. Without this, the listener's video can get
+    // stuck paused forever — heartbeat only seeks, never presses play.
+    const ourState = player.getPlayerState && player.getPlayerState();
+    const weArePlaying = ourState === YT.PlayerState.PLAYING ||
+                         ourState === YT.PlayerState.BUFFERING;
+    if (isPlaying && !weArePlaying && !listenerApplying) {
+      setSyncStatus('resyncing', 'Catching up to host…');
+      listenerApplying = true;
+      player.seekTo(expectedTime, true);
+      player.playVideo();
+      setTimeout(() => { listenerApplying = false; }, 500);
+      return;
+    }
 
     if (drift > 1.0) {
       setSyncStatus('resyncing', `Re-syncing… (${drift.toFixed(1)}s)`);
@@ -787,7 +826,7 @@ btnCreate.addEventListener('click', () => {
   const displayName = displayNameInput ? displayNameInput.value.trim() : '';
   const password    = roomPasswordInput ? roomPasswordInput.value.trim() : '';
   if (!password || password.length < 4) { setLandingError('Password must be at least 4 characters.'); btnCreate.disabled = btnJoin.disabled = false; return; }
-  socket.emit('create-room', { roomId, displayName, password }, (res) => {
+  socket.emit('create-room', { roomId, displayName, password, userId }, (res) => {
     if (res.error) {
       setLandingError(res.error);
       btnCreate.disabled = btnJoin.disabled = false;
@@ -807,7 +846,7 @@ btnJoin.addEventListener('click', () => {
   const displayName = displayNameInput ? displayNameInput.value.trim() : '';
   const password    = roomPasswordInput ? roomPasswordInput.value.trim() : '';
   if (!password) { setLandingError('Enter the room password.'); btnCreate.disabled = btnJoin.disabled = false; return; }
-  socket.emit('join-room', { roomId, displayName, password }, (res) => {
+  socket.emit('join-room', { roomId, displayName, password, userId }, (res) => {
     if (res.error) {
       setLandingError(res.error);
       btnCreate.disabled = btnJoin.disabled = false;

@@ -100,12 +100,22 @@ function cancelPendingHostHandoff(roomId) {
   if (entry) { clearTimeout(entry.timeout); pendingHostHandoff.delete(roomId); }
 }
 
+// Pending "X left the room" chat messages — delayed so that brief
+// reconnects (same userId rejoins in 4s) don't spam join/leave messages.
+const pendingLeaves = new Map(); // `${roomId}:${userId}` → timeout
+
+function cancelPendingLeave(key) {
+  const t = pendingLeaves.get(key);
+  if (t) { clearTimeout(t); pendingLeaves.delete(key); }
+}
+
 io.on('connection', (socket) => {
   console.log(`[connect] ${socket.id}`);
   joinAttempts.set(socket.id, 0);
 
   // ── Create Room ──────────────────────────────────────────
-  socket.on('create-room', ({ roomId, displayName, password }, ack) => {
+  socket.on('create-room', ({ roomId, displayName, password, userId }, ack) => {
+    if (userId) socket.userId = String(userId).slice(0, 64);
     if (!roomId || typeof roomId !== 'string')
       return ack && ack({ error: 'Invalid room ID.' });
 
@@ -167,7 +177,8 @@ io.on('connection', (socket) => {
   });
 
   // ── Join Room ────────────────────────────────────────────
-  socket.on('join-room', ({ roomId, displayName, password }, ack) => {
+  socket.on('join-room', ({ roomId, displayName, password, userId }, ack) => {
+    if (userId) socket.userId = String(userId).slice(0, 64);
     if (!roomId || typeof roomId !== 'string')
       return ack && ack({ error: 'Invalid room ID.' });
 
@@ -206,7 +217,19 @@ io.on('connection', (socket) => {
       : [];
 
     socket.to(roomId).emit('peer-joined', { peerId: socket.id });
-    io.to(roomId).emit('chat-system', { text: `${socket.displayName} joined the room`, ts: Date.now() });
+
+    // Dedupe rejoin spam: if this userId had a pending "left" message
+    // (disconnected <4s ago), cancel it and skip the "joined" message too.
+    const dcKey = socket.userId ? `${roomId}:${socket.userId}` : null;
+    const isReconnect = dcKey && pendingLeaves.has(dcKey);
+    if (isReconnect) {
+      cancelPendingLeave(dcKey);
+    } else {
+      io.to(roomId).emit('chat-system', {
+        text: `${socket.displayName} joined the room`,
+        ts:   Date.now(),
+      });
+    }
 
     ack && ack({
       role:    'listener',
@@ -415,10 +438,31 @@ io.on('connection', (socket) => {
       }
     }
 
-    const count = getRoomUserCount(roomId) - 1;
-    io.to(roomId).emit('user-count', { count: Math.max(0, count) });
-    socket.to(roomId).emit('peer-left',    { peerId: socket.id });
-    socket.to(roomId).emit('chat-system',  { text: `${socket.displayName || 'Someone'} left the room`, ts: Date.now() });
+    // At this point the socket has already left the Socket.IO room,
+    // so getRoomUserCount already reflects the post-disconnect count.
+    io.to(roomId).emit('user-count', { count: getRoomUserCount(roomId) });
+    socket.to(roomId).emit('peer-left', { peerId: socket.id });
+
+    // Dedupe "X left the room" chat spam caused by brief reconnects.
+    // We delay the "left" message by 4s — if the same userId rejoins in
+    // that window, we cancel the leave message entirely.
+    if (socket.userId) {
+      const dcKey = `${roomId}:${socket.userId}`;
+      cancelPendingLeave(dcKey);
+      const t = setTimeout(() => {
+        pendingLeaves.delete(dcKey);
+        io.to(roomId).emit('chat-system', {
+          text: `${socket.displayName || 'Someone'} left the room`,
+          ts:   Date.now(),
+        });
+      }, 4000);
+      pendingLeaves.set(dcKey, t);
+    } else {
+      io.to(roomId).emit('chat-system', {
+        text: `${socket.displayName || 'Someone'} left the room`,
+        ts:   Date.now(),
+      });
+    }
   });
 });
 
