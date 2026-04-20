@@ -40,6 +40,15 @@ const RTC_CONFIG = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
+    // Free TURN relays (Metered OpenRelay) — needed when both peers are
+    // behind symmetric NAT (very common on cellular/mobile networks).
+    // Without these, mic fails between users on different networks.
+    { urls: 'turn:openrelay.metered.ca:80',
+      username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:443',
+      username: 'openrelayproject', credential: 'openrelayproject' },
+    { urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+      username: 'openrelayproject', credential: 'openrelayproject' },
   ],
 };
 
@@ -95,6 +104,36 @@ const netflixPanel      = $('netflix-panel');
 const netflixTimeInput  = $('netflix-time-input');
 const btnNetflixSync    = $('btn-netflix-sync');
 const roomPasswordInput = $('room-password-input');
+
+// ── Session persistence (survives refresh / brief disconnect) ──
+// We store the room creds in sessionStorage and auto-rejoin on:
+//   1. Initial page load (if session exists → user just refreshed)
+//   2. Socket reconnect (if currentRoomId still set → brief network blip)
+// This fixes the "refresh kicks me out" bug and the "chat stops working
+// after a while" bug (silent socket reconnects re-joining the room).
+const SESSION_KEY = 'syncroom-session';
+let isAutoRejoining = false;
+
+function saveSession(extra = {}) {
+  if (!currentRoomId) return;
+  try {
+    sessionStorage.setItem(SESSION_KEY, JSON.stringify({
+      roomId:      currentRoomId,
+      role:        role,
+      displayName: displayNameInput?.value?.trim() || extra.displayName || '',
+      password:    roomPasswordInput?.value?.trim() || extra.password || '',
+    }));
+  } catch (e) {}
+}
+
+function loadSession() {
+  try { return JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null'); }
+  catch { return null; }
+}
+
+function clearSession() {
+  try { sessionStorage.removeItem(SESSION_KEY); } catch (e) {}
+}
 
 // ── Utilities ──────────────────────────────────────────────
 function extractVideoId(url) {
@@ -242,6 +281,7 @@ function enterRoom(roomId, myRole) {
     roleBadge.className   = 'badge badge-listen';
     setListenerControls();
   }
+  saveSession();
 }
 
 // ── Role switch ────────────────────────────────────────────
@@ -252,6 +292,7 @@ function becomeHost() {
   setHostControls();
   if (playerReady) startHeartbeat();
   setupMediaSession();
+  saveSession();
   showToast('You are now the host!');
 }
 
@@ -261,6 +302,7 @@ function becomeListener() {
   roleBadge.className   = 'badge badge-listen';
   stopHeartbeat();
   setListenerControls();
+  saveSession();
   showToast('You are now a listener.');
 }
 
@@ -435,14 +477,93 @@ function setupMediaSession() {
   };
 }
 
+// ── Auto-rejoin (refresh recovery + reconnect after net blip) ──
+// Tries to put us back in our previous room. Used by:
+//   • Initial page load → user just refreshed (sessionStorage still has creds)
+//   • Socket reconnect  → brief network drop (currentRoomId still set client-side
+//     but server-side our new socket.id isn't in the Socket.IO room → chat etc. would silently fail)
+function tryAutoRejoin() {
+  if (isAutoRejoining) return;
+  const session = loadSession();
+  if (!session || !session.roomId || !session.password) return;
+
+  isAutoRejoining = true;
+
+  socket.emit('join-room', {
+    roomId:      session.roomId,
+    displayName: session.displayName,
+    password:    session.password,
+  }, (res) => {
+    if (res && !res.error) {
+      // Re-joined as listener (server may have already promoted someone else to host)
+      if (!currentRoomId) {
+        // Fresh page load — wire up UI
+        enterRoom(session.roomId, res.role || 'listener');
+        applySyncMode(res.syncMode || 'strict');
+        applyPlatform(res.platform || 'youtube');
+        if (res.state && res.state.videoId) {
+          pendingState  = res.state;
+          hostIsPlaying = res.state.isPlaying;
+          loadPlayerVideo(res.state.videoId);
+        }
+      }
+      isAutoRejoining = false;
+      return;
+    }
+
+    // Join failed — try recovery (we might have been the host and the room is in grace period)
+    if (session.role === 'host') {
+      socket.emit('create-room', {
+        roomId:      session.roomId,
+        displayName: session.displayName,
+        password:    session.password,
+      }, (res2) => {
+        isAutoRejoining = false;
+        if (res2 && !res2.error) {
+          if (!currentRoomId) {
+            enterRoom(session.roomId, 'host');
+            setupMediaSession();
+            if (res2.recovered && res2.state && res2.state.videoId) {
+              pendingState  = res2.state;
+              hostIsPlaying = res2.state.isPlaying;
+              loadPlayerVideo(res2.state.videoId);
+              showToast('Room recovered after refresh');
+            }
+          } else if (res2.recovered) {
+            showToast('Room recovered — you are host again');
+          }
+        } else {
+          // Room is gone for real
+          clearSession();
+          if (currentRoomId) {
+            showToast('Room no longer exists');
+            location.reload();
+          }
+        }
+      });
+    } else {
+      isAutoRejoining = false;
+      clearSession();
+    }
+  });
+}
+
 // ── Socket setup ───────────────────────────────────────────
 function initSocket() {
   socket = io();
 
-  socket.on('connect',    () => setConnStatus(true));
+  socket.on('connect', () => {
+    setConnStatus(true);
+    // On every connect (initial OR reconnect), if we have a stored session,
+    // try to put ourselves back in the room. This fixes:
+    //   • Refresh kicks me out → restored automatically
+    //   • Chat dies after a while → caused by silent reconnects with new socket.id
+    //     not being in the Socket.IO room. Auto-rejoin re-adds us.
+    setTimeout(tryAutoRejoin, 50);
+  });
   socket.on('disconnect', () => {
     setConnStatus(false);
-    setSyncStatus('waiting', 'Disconnected');
+    setSyncStatus('waiting', 'Reconnecting…');
     stopHeartbeat();
   });
 
@@ -1284,4 +1405,24 @@ if (chatToggleBtn) {
 }
 
 // ── Bootstrap ──────────────────────────────────────────────
+// If we have a stored session, hide landing immediately so the user doesn't
+// see a flash of the landing page during auto-rejoin after refresh.
+(function preBootstrap() {
+  const session = loadSession();
+  if (session && session.roomId) {
+    landingEl.style.display = 'none';
+    roomEl.style.display    = 'flex';
+    setSyncStatus('waiting', 'Reconnecting…');
+  }
+})();
+
+// Warn before refresh so user knows they're about to leave
+window.addEventListener('beforeunload', (e) => {
+  if (currentRoomId) {
+    e.preventDefault();
+    e.returnValue = 'You will leave the room.';
+    return e.returnValue;
+  }
+});
+
 initSocket();

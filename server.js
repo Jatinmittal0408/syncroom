@@ -79,6 +79,16 @@ function getListenerIds(roomId) {
 const joinAttempts = new Map(); // socketId → count
 const MAX_JOIN_ATTEMPTS = 5;
 
+// Rooms scheduled for deletion (30s grace period after host disconnects alone).
+// Allows accidental refresh / brief network blip without losing the room.
+const pendingDeletes = new Map(); // roomId → timeout
+const ROOM_GRACE_MS  = 30 * 1000;
+
+function cancelPendingDelete(roomId) {
+  const t = pendingDeletes.get(roomId);
+  if (t) { clearTimeout(t); pendingDeletes.delete(roomId); }
+}
+
 io.on('connection', (socket) => {
   console.log(`[connect] ${socket.id}`);
   joinAttempts.set(socket.id, 0);
@@ -92,11 +102,34 @@ io.on('connection', (socket) => {
     if (roomId.length < 2 || roomId.length > 32)
       return ack && ack({ error: 'Room ID must be 2–32 characters (letters, numbers, - _).' });
 
-    if (rooms[roomId])
-      return ack && ack({ error: 'Room name already taken — choose a different one.' });
-
     if (!password || typeof password !== 'string' || password.trim().length < 4)
       return ack && ack({ error: 'Password must be at least 4 characters.' });
+
+    // Recovery path: if room is in grace period (host just disconnected),
+    // allow the original host to reclaim it by re-creating with same password.
+    if (rooms[roomId] && pendingDeletes.has(roomId)) {
+      if (hashPassword(password.trim()) !== rooms[roomId].passwordHash)
+        return ack && ack({ error: 'Room recovering — wrong password.' });
+      cancelPendingDelete(roomId);
+      rooms[roomId].hostSocketId = socket.id;
+      socket.displayName = (displayName || '').trim().slice(0, 24) || 'Host';
+      socket.join(roomId);
+      socket.roomId = roomId;
+      socket.role   = 'host';
+      console.log(`[recover-room] "${roomId}" reclaimed by ${socket.id}`);
+      io.to(roomId).emit('user-count', { count: getRoomUserCount(roomId) });
+      return ack && ack({ role: 'host', recovered: true,
+        state: {
+          videoId:              rooms[roomId].currentVideoId,
+          isPlaying:            rooms[roomId].playbackState.isPlaying,
+          currentTime:          rooms[roomId].playbackState.currentTime,
+          lastUpdatedTimestamp: rooms[roomId].playbackState.lastUpdatedTimestamp,
+        },
+      });
+    }
+
+    if (rooms[roomId])
+      return ack && ack({ error: 'Room name already taken — choose a different one.' });
 
     socket.displayName = (displayName || '').trim().slice(0, 24) || 'Host';
 
@@ -141,6 +174,8 @@ io.on('connection', (socket) => {
 
     // Reset attempt count on success
     joinAttempts.set(socket.id, 0);
+    // Joining cancels any pending room deletion
+    cancelPendingDelete(roomId);
     socket.displayName = (displayName || '').trim().slice(0, 24) || 'Listener';
 
     socket.join(roomId);
@@ -333,8 +368,17 @@ io.on('connection', (socket) => {
         if (nhs) nhs.role = 'host';
         io.to(roomId).emit('host-transferred', { newHostId, oldHostId: socket.id, reason: 'disconnect' });
       } else {
-        io.to(roomId).emit('host-left', {});
-        delete rooms[roomId];
+        // Host alone — schedule deletion with 30s grace period.
+        // Allows refresh/reconnect to recover the room.
+        cancelPendingDelete(roomId);
+        const t = setTimeout(() => {
+          io.to(roomId).emit('host-left', {});
+          delete rooms[roomId];
+          pendingDeletes.delete(roomId);
+          console.log(`[room-deleted] "${roomId}" (grace period expired)`);
+        }, ROOM_GRACE_MS);
+        pendingDeletes.set(roomId, t);
+        console.log(`[room-grace] "${roomId}" pending deletion in ${ROOM_GRACE_MS}ms`);
         return;
       }
     }
