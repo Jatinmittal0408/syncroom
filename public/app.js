@@ -489,15 +489,23 @@ function tryAutoRejoin() {
 
   isAutoRejoining = true;
 
-  socket.emit('join-room', {
-    roomId:      session.roomId,
-    displayName: session.displayName,
-    password:    session.password,
-  }, (res) => {
-    if (res && !res.error) {
-      // Re-joined as listener (server may have already promoted someone else to host)
+  // Helper: fall back to join-room as listener (or whatever the server gives us)
+  const fallbackJoin = () => {
+    socket.emit('join-room', {
+      roomId:      session.roomId,
+      displayName: session.displayName,
+      password:    session.password,
+    }, (res) => {
+      isAutoRejoining = false;
+      if (!res || res.error) {
+        clearSession();
+        if (currentRoomId) {
+          showToast(res?.error || 'Room no longer exists');
+          setTimeout(() => location.reload(), 1500);
+        }
+        return;
+      }
       if (!currentRoomId) {
-        // Fresh page load — wire up UI
         enterRoom(session.roomId, res.role || 'listener');
         applySyncMode(res.syncMode || 'strict');
         applyPlatform(res.platform || 'youtube');
@@ -507,45 +515,43 @@ function tryAutoRejoin() {
           loadPlayerVideo(res.state.videoId);
         }
       }
-      isAutoRejoining = false;
-      return;
-    }
+    });
+  };
 
-    // Join failed — try recovery (we might have been the host and the room is in grace period)
-    if (session.role === 'host') {
-      socket.emit('create-room', {
-        roomId:      session.roomId,
-        displayName: session.displayName,
-        password:    session.password,
-      }, (res2) => {
+  // If we WERE the host, try to reclaim host first via create-room.
+  // The server's "recovery path" lets the original host reclaim a room that's
+  // in the 30s grace period (after refresh) by re-creating with the same password.
+  if (session.role === 'host') {
+    socket.emit('create-room', {
+      roomId:      session.roomId,
+      displayName: session.displayName,
+      password:    session.password,
+    }, (res) => {
+      if (res && !res.error) {
         isAutoRejoining = false;
-        if (res2 && !res2.error) {
-          if (!currentRoomId) {
-            enterRoom(session.roomId, 'host');
-            setupMediaSession();
-            if (res2.recovered && res2.state && res2.state.videoId) {
-              pendingState  = res2.state;
-              hostIsPlaying = res2.state.isPlaying;
-              loadPlayerVideo(res2.state.videoId);
-              showToast('Room recovered after refresh');
-            }
-          } else if (res2.recovered) {
-            showToast('Room recovered — you are host again');
+        if (!currentRoomId) {
+          enterRoom(session.roomId, 'host');
+          setupMediaSession();
+          if (res.recovered && res.state && res.state.videoId) {
+            pendingState  = res.state;
+            hostIsPlaying = res.state.isPlaying;
+            loadPlayerVideo(res.state.videoId);
+            showToast('Room recovered — you are still host');
+          } else if (res.recovered) {
+            showToast('Room recovered — you are still host');
           }
-        } else {
-          // Room is gone for real
-          clearSession();
-          if (currentRoomId) {
-            showToast('Room no longer exists');
-            location.reload();
-          }
+        } else if (res.recovered) {
+          showToast('Reconnected — host role restored');
         }
-      });
-    } else {
-      isAutoRejoining = false;
-      clearSession();
-    }
-  });
+        return;
+      }
+      // Recovery failed (room taken over by another listener, grace expired,
+      // or someone re-created with different password). Fall back to listener join.
+      fallbackJoin();
+    });
+  } else {
+    fallbackJoin();
+  }
 }
 
 // ── Socket setup ───────────────────────────────────────────
